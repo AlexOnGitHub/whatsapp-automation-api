@@ -1,0 +1,697 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/**
+ * ─────────────────────────────
+ * ENUMS
+ * ─────────────────────────────
+ */
+
+enum BusinessStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum BusinessPlan {
+  BASIC
+  AGENDA
+  PRO
+}
+
+enum ConversationStatus {
+  OPEN
+  HUMAN_HANDOFF
+  CLOSED
+  EXPIRED
+}
+
+enum SessionStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  EXPIRED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum MessageType {
+  TEXT
+  INTERACTIVE
+  IMAGE
+  AUDIO
+  DOCUMENT
+  UNKNOWN
+}
+
+enum MessageDeliveryStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  RESCHEDULED
+  COMPLETED
+  NO_SHOW
+}
+
+enum CustomerRequestStatus {
+  PENDING
+  IN_REVIEW
+  RESOLVED
+  CLOSED
+}
+
+enum HumanHandoffStatus {
+  PENDING
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum IntegrationStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+}
+
+enum ErrorSeverity {
+  INFO
+  WARNING
+  ERROR
+  CRITICAL
+}
+
+/**
+ * ─────────────────────────────
+ * BUSINESS / TENANT
+ * ─────────────────────────────
+ */
+
+model Business {
+  id                  String         @id @default(uuid())
+  name                String
+  slug                String         @unique
+  businessType        String?
+  whatsappPhoneNumber String?        @unique
+  timezone            String         @default("America/Mexico_City")
+  status              BusinessStatus @default(ACTIVE)
+  plan                BusinessPlan   @default(BASIC)
+
+  config           BusinessConfig?
+  modules          BusinessModule[]
+  customers        Customer[]
+  conversations    Conversation[]
+  sessions         ConversationSession[]
+  messages         Message[]
+  faqItems         FaqItem[]
+  services         Service[]
+  appointments     Appointment[]
+  customerRequests CustomerRequest[]
+  humanHandoffs    HumanHandoff[]
+  integrations     Integration[]
+  interactionLogs  InteractionLog[]
+  errorLogs        ErrorLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([plan])
+  @@index([businessType])
+}
+
+/**
+ * Configuración general del negocio.
+ */
+model BusinessConfig {
+  id String @id @default(uuid())
+
+  businessId String   @unique
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  welcomeMessage      String
+  humanHandoffMessage String?
+  fallbackMessage     String?
+
+  mainMenuConfig      Json?
+  businessHoursConfig Json?
+  paymentMethods      Json?
+
+  locationText       String?
+  googleMapsUrl      String?
+  cancellationPolicy String?
+
+  locale       String @default("es-MX")
+  currencyCode String @default("MXN")
+
+  maxFailedAttempts        Int @default(2)
+  sessionExpirationMinutes Int @default(60)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/**
+ * Módulos habilitados por negocio.
+ */
+model BusinessModule {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  moduleKey String
+  enabled   Boolean @default(true)
+  config    Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([businessId, moduleKey])
+  @@index([businessId, enabled])
+}
+
+/**
+ * ─────────────────────────────
+ * CUSTOMERS
+ * ─────────────────────────────
+ */
+
+model Customer {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  whatsappPhone String
+  whatsappName  String?
+  displayName   String?
+
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+
+  conversations    Conversation[]
+  sessions         ConversationSession[]
+  messages         Message[]
+  appointments     Appointment[]
+  customerRequests CustomerRequest[]
+  humanHandoffs    HumanHandoff[]
+  interactionLogs  InteractionLog[]
+  errorLogs        ErrorLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([businessId, whatsappPhone])
+  @@index([businessId])
+  @@index([whatsappPhone])
+  @@index([businessId, lastSeenAt])
+}
+
+/**
+ * ─────────────────────────────
+ * CONVERSATIONS
+ * ─────────────────────────────
+ */
+
+model Conversation {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  status ConversationStatus @default(OPEN)
+
+  startedAt     DateTime  @default(now())
+  lastMessageAt DateTime?
+  closedAt      DateTime?
+  closedReason  String?
+
+  sessions        ConversationSession[]
+  messages        Message[]
+  humanHandoffs   HumanHandoff[]
+  interactionLogs InteractionLog[]
+  errorLogs       ErrorLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, customerId])
+  @@index([businessId, customerId, status])
+  @@index([businessId, status])
+  @@index([customerId, startedAt])
+  @@index([lastMessageAt])
+}
+
+/**
+ * ─────────────────────────────
+ * CONVERSATION SESSIONS
+ * ─────────────────────────────
+ */
+
+model ConversationSession {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  flowKey     String
+  flowVersion Int    @default(1)
+  stepKey     String
+
+  status SessionStatus @default(ACTIVE)
+
+  context Json?
+
+  failedAttempts Int @default(0)
+
+  lastActivityAt DateTime  @default(now())
+  expiresAt      DateTime?
+
+  completedAt DateTime?
+  cancelledAt DateTime?
+  expiredAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, customerId, status])
+  @@index([conversationId, status])
+  @@index([businessId, flowKey])
+  @@index([businessId, flowKey, status])
+  @@index([expiresAt])
+}
+
+/**
+ * ─────────────────────────────
+ * MESSAGES
+ * ─────────────────────────────
+ */
+
+model Message {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  direction   MessageDirection
+  messageType MessageType      @default(TEXT)
+
+  whatsappMessageId String? @unique
+
+  deliveryStatus MessageDeliveryStatus?
+
+  content    String?
+  rawPayload Json?
+
+  flowKey String?
+  stepKey String?
+
+  providerTimestamp DateTime?
+
+  receivedAt DateTime?
+
+  queuedAt    DateTime?
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  readAt      DateTime?
+  failedAt    DateTime?
+
+  failureCode   String?
+  failureReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  statusEvents MessageStatusEvent[]
+
+  @@index([businessId, customerId])
+  @@index([businessId, conversationId])
+  @@index([conversationId, createdAt])
+  @@index([businessId, direction, createdAt])
+  @@index([businessId, deliveryStatus])
+  @@index([createdAt])
+}
+
+/**
+ * Historial inmutable de estados de entrega.
+ */
+model MessageStatusEvent {
+  id String @id @default(uuid())
+
+  messageId String
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  status MessageDeliveryStatus
+
+  occurredAt DateTime
+
+  rawPayload Json?
+
+  receivedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  @@unique([messageId, status, occurredAt])
+  @@index([messageId, occurredAt])
+  @@index([status, occurredAt])
+}
+
+/**
+ * ─────────────────────────────
+ * FAQ
+ * ─────────────────────────────
+ */
+
+model FaqItem {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  category String?
+  question String
+  answer   String
+
+  keywords  String[]
+  sortOrder Int      @default(0)
+  enabled   Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, enabled])
+  @@index([businessId, sortOrder])
+}
+
+/**
+ * ─────────────────────────────
+ * SERVICES
+ * ─────────────────────────────
+ */
+
+model Service {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+
+  price Decimal? @db.Decimal(10, 2)
+
+  durationMinutes Int
+
+  enabled   Boolean @default(true)
+  sortOrder Int     @default(0)
+
+  appointments Appointment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, enabled])
+  @@index([businessId, sortOrder])
+}
+
+/**
+ * ─────────────────────────────
+ * APPOINTMENTS
+ * ─────────────────────────────
+ */
+
+model Appointment {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  serviceId String?
+  service   Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+
+  customerName  String
+  customerPhone String
+
+  serviceNameSnapshot     String
+  servicePriceSnapshot    Decimal? @db.Decimal(10, 2)
+  durationMinutesSnapshot Int
+
+  appointmentDate DateTime
+  startTime       DateTime
+  endTime         DateTime
+
+  status AppointmentStatus @default(CONFIRMED)
+
+  notes  String?
+  source String  @default("WHATSAPP")
+
+  googleCalendarEventId String?
+  googleSheetRowId      String?
+
+  confirmedAt   DateTime?
+  cancelledAt   DateTime?
+  completedAt   DateTime?
+  rescheduledAt DateTime?
+  noShowAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, appointmentDate])
+  @@index([businessId, startTime])
+  @@index([businessId, startTime, endTime])
+  @@index([businessId, status])
+  @@index([customerId])
+}
+
+/**
+ * ─────────────────────────────
+ * CUSTOMER REQUESTS
+ * ─────────────────────────────
+ */
+
+model CustomerRequest {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  customerName  String
+  customerPhone String
+
+  requestType String
+  description String
+
+  status CustomerRequestStatus @default(PENDING)
+
+  source String @default("WHATSAPP")
+
+  googleSheetRowId String?
+
+  inReviewAt DateTime?
+  resolvedAt DateTime?
+  closedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, status])
+  @@index([businessId, createdAt])
+  @@index([customerId])
+}
+
+/**
+ * ─────────────────────────────
+ * HUMAN HANDOFFS
+ * ─────────────────────────────
+ */
+
+model HumanHandoff {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  customerName  String?
+  customerPhone String
+
+  reason          String
+  lastUserMessage String?
+
+  status HumanHandoffStatus @default(PENDING)
+
+  assignedTo String?
+
+  googleSheetRowId String?
+
+  startedAt  DateTime?
+  resolvedAt DateTime?
+  closedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId, status])
+  @@index([businessId, createdAt])
+  @@index([customerId])
+  @@index([conversationId])
+}
+
+/**
+ * ─────────────────────────────
+ * INTEGRATIONS
+ * ─────────────────────────────
+ */
+
+model Integration {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  provider        String
+  integrationType String
+
+  status IntegrationStatus @default(ACTIVE)
+
+  /**
+   * Tokens/credenciales deberán persistirse cifrados,
+   * nunca como JSON en texto plano.
+   */
+  credentialsEncrypted String?
+
+  settings Json?
+
+  lastSyncedAt DateTime?
+  lastErrorAt  DateTime?
+  lastError    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([businessId, provider, integrationType])
+  @@index([businessId, status])
+  @@index([provider, integrationType])
+}
+
+/**
+ * ─────────────────────────────
+ * FUNCTIONAL / AUDIT LOGS
+ * ─────────────────────────────
+ */
+
+model InteractionLog {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  correlationId String?
+
+  eventType String
+
+  flowKey String?
+  stepKey String?
+
+  description String?
+  metadata    Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([businessId, eventType])
+  @@index([businessId, createdAt])
+  @@index([customerId])
+  @@index([conversationId])
+  @@index([correlationId])
+}
+
+/**
+ * ─────────────────────────────
+ * TECHNICAL ERROR LOGS
+ * ─────────────────────────────
+ */
+
+model ErrorLog {
+  id String @id @default(uuid())
+
+  businessId String?
+  business   Business? @relation(fields: [businessId], references: [id], onDelete: SetNull)
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  correlationId String?
+
+  severity ErrorSeverity @default(ERROR)
+
+  source    String
+  errorCode String?
+
+  errorMessage String
+  stackTrace   String?
+
+  payload  Json?
+  metadata Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([source])
+  @@index([severity])
+  @@index([businessId])
+  @@index([businessId, createdAt])
+  @@index([correlationId])
+  @@index([createdAt])
+}
