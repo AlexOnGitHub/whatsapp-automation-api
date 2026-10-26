@@ -13,9 +13,20 @@ import { FlowEngineController } from './flow-engine.controller';
 import { FlowEngineService } from './flow-engine.service';
 
 import { FlowHandlerRegistry } from './handlers/flow-handler.registry';
+
 import { MainMenuFlowHandler } from './handlers/main-menu-flow.handler';
+import { FaqFlowHandler } from './handlers/faq-flow.handler';
+import { AppointmentFlowHandler } from './handlers/appointment-flow.handler';
+import { RequestFlowHandler } from './handlers/request-flow.handler';
+import { HumanHandoffFlowHandler } from './handlers/human-handoff-flow.handler';
 
 import { FlowTransitionService } from './services/flow-transition.service';
+
+import { ServicesCatalogModule } from '../services-catalog/services-catalog.module';
+
+import { AppointmentAvailabilityModule } from '../appointment-availability/appointment-availability.module';
+
+import { AppointmentBookingModule } from '../appointment-booking/appointment-booking.module';
 
 @Module({
   imports: [
@@ -27,6 +38,9 @@ import { FlowTransitionService } from './services/flow-transition.service';
     MessagesModule,
     InteractionLogsModule,
     ErrorLogsModule,
+    ServicesCatalogModule,
+    AppointmentAvailabilityModule,
+    AppointmentBookingModule,
   ],
 
   controllers: [FlowEngineController],
@@ -37,7 +51,12 @@ import { FlowTransitionService } from './services/flow-transition.service';
     FlowTransitionService,
 
     FlowHandlerRegistry,
+
     MainMenuFlowHandler,
+    FaqFlowHandler,
+    AppointmentFlowHandler,
+    RequestFlowHandler,
+    HumanHandoffFlowHandler,
   ],
 
   exports: [FlowEngineService, FlowTransitionService],

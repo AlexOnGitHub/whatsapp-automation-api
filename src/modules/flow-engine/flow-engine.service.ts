@@ -2,7 +2,12 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 
 import { randomUUID } from 'crypto';
 
-import { FLOW_KEYS, getFlowDefinition } from '../../common/flows/flow-registry';
+import {
+  FLOW_KEYS,
+  getFlowDefinition,
+  isValidFlowKey,
+  type FlowKey,
+} from '../../common/flows/flow-registry';
 
 import { INTERACTION_EVENT_TYPES } from '../../common/constants/interaction-event-types';
 
@@ -89,7 +94,7 @@ export class FlowEngineService {
       }
 
       /* ─────────────────────────────────────────
-         4. VALIDAR MENSAJE PERSISTIDO
+         4. VALIDAR MESSAGE PERSISTIDO
       ───────────────────────────────────────── */
 
       const message = dto.messageId
@@ -109,7 +114,7 @@ export class FlowEngineService {
       }
 
       /* ─────────────────────────────────────────
-         5. RESOLVER SESSION ACTIVA
+         5. BUSCAR SESSION ACTIVA
       ───────────────────────────────────────── */
 
       let session =
@@ -119,11 +124,10 @@ export class FlowEngineService {
 
       let startingNewFlow = false;
 
-      /*
-       * Si no existe ninguna sesión activa,
-       * MAIN_MENU es el punto de entrada del
-       * runtime conversacional.
-       */
+      /* ─────────────────────────────────────────
+         6. SIN SESSION → MAIN_MENU
+      ───────────────────────────────────────── */
+
       if (!session) {
         const definition = getFlowDefinition(FLOW_KEYS.MAIN_MENU);
 
@@ -146,10 +150,6 @@ export class FlowEngineService {
 
         startingNewFlow = true;
 
-        /* ───────────────────────────────────────
-           OBSERVABILIDAD: SESSION_STARTED
-        ─────────────────────────────────────── */
-
         await this.interactionLogsService.create({
           businessId: dto.businessId,
 
@@ -167,10 +167,6 @@ export class FlowEngineService {
 
           description: 'Se creó una nueva sesión conversacional.',
         });
-
-        /* ───────────────────────────────────────
-           OBSERVABILIDAD: FLOW_STARTED
-        ─────────────────────────────────────── */
 
         await this.interactionLogsService.create({
           businessId: dto.businessId,
@@ -192,28 +188,25 @@ export class FlowEngineService {
       }
 
       /* ─────────────────────────────────────────
-         6. RESOLVER HANDLER
+         7. VALIDAR FLOW KEY PERSISTIDO
       ───────────────────────────────────────── */
 
-      /*
-       * Por el momento solamente MAIN_MENU tiene
-       * handler implementado.
-       *
-       * Cuando agreguemos APPOINTMENT, FAQ,
-       * REQUEST y HUMAN_HANDOFF esta validación
-       * desaparecerá y resolveremos directamente
-       * mediante FlowHandlerRegistry.
-       */
-      if (session.flowKey !== FLOW_KEYS.MAIN_MENU) {
+      if (!isValidFlowKey(session.flowKey)) {
         throw new BadRequestException(
-          `El flujo ${session.flowKey} todavía no tiene implementación en FlowEngine`,
+          `La sesión contiene un flowKey no reconocido: ${session.flowKey}`,
         );
       }
 
-      const handler = this.flowHandlerRegistry.get(FLOW_KEYS.MAIN_MENU);
+      const currentFlowKey: FlowKey = session.flowKey;
 
       /* ─────────────────────────────────────────
-         7. CONSTRUIR FLOW CONTEXT
+         8. RESOLVER HANDLER DINÁMICAMENTE
+      ───────────────────────────────────────── */
+
+      const handler = this.flowHandlerRegistry.get(currentFlowKey);
+
+      /* ─────────────────────────────────────────
+         9. CONSTRUIR CONTEXTO
       ───────────────────────────────────────── */
 
       const context: FlowContext = {
@@ -243,7 +236,7 @@ export class FlowEngineService {
       };
 
       /* ─────────────────────────────────────────
-         8. EJECUTAR HANDLER
+         10. EJECUTAR FLOW ACTUAL
       ───────────────────────────────────────── */
 
       const result = startingNewFlow
@@ -251,36 +244,15 @@ export class FlowEngineService {
         : await handler.handle(context);
 
       /* ─────────────────────────────────────────
-         9. ¿EL HANDLER SOLICITÓ TRANSICIÓN?
+         11. SIN TRANSICIÓN
       ───────────────────────────────────────── */
 
-      /*
-       * Si el handler únicamente quiere responder
-       * dentro del mismo flow, terminamos aquí.
-       *
-       * Ejemplos:
-       *
-       * MAIN_MENU start()
-       * MAIN_MENU opción inválida
-       */
       if (!result.transition) {
         return result;
       }
 
-      /*
-       * Toda transición necesita una sesión origen.
-       *
-       * En condiciones normales siempre existe,
-       * pero conservamos esta validación defensiva.
-       */
-      if (!session) {
-        throw new BadRequestException(
-          'No existe una sesión activa desde la cual realizar la transición',
-        );
-      }
-
       /* ─────────────────────────────────────────
-         10. EJECUTAR TRANSICIÓN ATÓMICA
+         12. TRANSICIÓN ATÓMICA
       ───────────────────────────────────────── */
 
       const transition = await this.flowTransitionService.transitionToFlow({
@@ -295,42 +267,64 @@ export class FlowEngineService {
         reason: result.transition.reason,
       });
 
+      const targetFlowKey = result.transition.targetFlowKey;
+
       /* ─────────────────────────────────────────
-         11. RESPUESTA DE TRANSICIÓN
+         13. RESOLVER HANDLER DESTINO
       ───────────────────────────────────────── */
 
-      /*
-       * IMPORTANTE:
-       *
-       * Por ahora todavía NO ejecutamos:
-       *
-       * targetHandler.start()
-       *
-       * porque aún no hemos creado los handlers de:
-       *
-       * APPOINTMENT
-       * FAQ
-       * REQUEST
-       * HUMAN_HANDOFF
-       *
-       * En el siguiente bloque el engine hará:
-       *
-       * MainMenu.handle()
-       *      ↓
-       * transitionToFlow()
-       *      ↓
-       * Appointment.start()
-       */
+      const targetHandler = this.flowHandlerRegistry.get(targetFlowKey);
+
+      /* ─────────────────────────────────────────
+         14. CREAR CONTEXTO DEL NUEVO FLOW
+      ───────────────────────────────────────── */
+
+      const targetContext: FlowContext = {
+        correlationId,
+
+        businessId: dto.businessId,
+
+        customerId: dto.customerId,
+
+        conversationId: dto.conversationId,
+
+        customer,
+
+        conversation,
+
+        session: transition.session,
+
+        message,
+
+        input: {
+          messageType: dto.messageType,
+
+          text: dto.text,
+
+          interactiveId: dto.interactiveId,
+        },
+      };
+
+      /* ─────────────────────────────────────────
+         15. START DEL FLOW DESTINO
+      ───────────────────────────────────────── */
+
+      const targetResult = await targetHandler.start(targetContext);
+
+      /* ─────────────────────────────────────────
+         16. RESPUESTA FINAL
+      ───────────────────────────────────────── */
+
       return {
         handled: true,
 
-        flowKey: result.transition.targetFlowKey,
+        flowKey: targetFlowKey,
 
-        stepKey: transition.session.stepKey,
+        stepKey: targetResult.stepKey,
 
         sessionId: transition.session.id,
 
-        responses: result.responses,
+        responses: [...result.responses, ...targetResult.responses],
 
         metadata: {
           ...result.metadata,
@@ -343,9 +337,11 @@ export class FlowEngineService {
 
           targetSessionId: transition.session.id,
 
-          targetFlowKey: transition.session.flowKey,
+          targetFlowKey,
 
           targetStepKey: transition.session.stepKey,
+
+          targetReason: targetResult.metadata?.reason,
         },
       };
     } catch (error) {
@@ -353,10 +349,6 @@ export class FlowEngineService {
          ERROR OBSERVABILITY
       ───────────────────────────────────────── */
 
-      /*
-       * El logging técnico jamás debe sustituir
-       * ni esconder el error original.
-       */
       try {
         await this.errorLogsService.createFromError({
           error,
@@ -381,14 +373,7 @@ export class FlowEngineService {
             interactiveId: dto.interactiveId,
           },
         });
-      } catch {
-        /*
-         * Si incluso ErrorLog falla,
-         * conservamos el error original.
-         *
-         * No hacemos throw aquí para no ocultarlo.
-         */
-      }
+      } catch {}
 
       throw error;
     }
