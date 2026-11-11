@@ -1,3 +1,5 @@
+import { APP_GUARD } from '@nestjs/core';
+import { ApiAccessGuard } from './common/security/api-access.guard';
 import { Module } from '@nestjs/common';
 import { PrismaModule } from './database/prisma/prisma.module';
 import { AppController } from './app.controller';
@@ -17,6 +19,7 @@ import { AppointmentAvailabilityModule } from './modules/appointment-availabilit
 import { AppointmentBookingModule } from './modules/appointment-booking/appointment-booking.module';
 import { AppointmentsModule } from './modules/appointments/appointments.module';
 import { GoogleCalendarModule } from './modules/google-calendar/google-calendar.module';
+import { IntegrationJobsModule } from './modules/integration-jobs/integration-jobs.module';
 
 @Module({
   imports: [
@@ -36,8 +39,9 @@ import { GoogleCalendarModule } from './modules/google-calendar/google-calendar.
     AppointmentBookingModule,
     AppointmentsModule,
     GoogleCalendarModule,
+    IntegrationJobsModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [AppService, { provide: APP_GUARD, useClass: ApiAccessGuard }],
 })
 export class AppModule {}

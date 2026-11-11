@@ -1,47 +1,12 @@
-import {
-  Controller,
-  Delete,
-  Get,
-  Param,
-  Patch,
-  Post,
-  Query,
-} from '@nestjs/common';
+import { Controller, Delete, Param, Patch, Post } from '@nestjs/common';
 
 import { AppointmentCalendarSyncService } from './appointment-calendar-sync.service';
-
-import { GoogleCalendarOAuthService } from './google-calendar-oauth.service';
 
 @Controller()
 export class GoogleCalendarController {
   constructor(
-    private readonly googleCalendarOAuthService: GoogleCalendarOAuthService,
-
     private readonly appointmentCalendarSyncService: AppointmentCalendarSyncService,
   ) {}
-
-  /* ─────────────────────────────────────────────
-     OAUTH
-  ───────────────────────────────────────────── */
-
-  @Get('businesses/:businessId/integrations/google-calendar/auth-url')
-  generateAuthUrl(
-    @Param('businessId')
-    businessId: string,
-  ) {
-    return this.googleCalendarOAuthService.generateAuthorizationUrl(businessId);
-  }
-
-  @Get('integrations/google-calendar/oauth/callback')
-  callback(
-    @Query('code')
-    code: string,
-
-    @Query('state')
-    state: string,
-  ) {
-    return this.googleCalendarOAuthService.handleCallback(code, state);
-  }
 
   /* ─────────────────────────────────────────────
      APPOINTMENT SYNC

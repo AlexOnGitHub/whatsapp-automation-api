@@ -1,3 +1,4 @@
+import { ApiAccess } from '../../common/security/api-access.guard';
 import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
 
 import { ConversationSessionsService } from './conversation-sessions.service';
@@ -5,6 +6,7 @@ import { ConversationSessionsService } from './conversation-sessions.service';
 import { CreateConversationSessionDto } from './dto/create-conversation-session.dto';
 import { UpdateSessionStateDto } from './dto/update-session-state.dto';
 
+@ApiAccess('conversationSession')
 @Controller('conversation-sessions')
 export class ConversationSessionsController {
   constructor(

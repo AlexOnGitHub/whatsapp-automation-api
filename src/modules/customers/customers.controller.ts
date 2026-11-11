@@ -1,3 +1,4 @@
+import { ApiAccess } from '../../common/security/api-access.guard';
 import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
 
 import { CustomersService } from './customers.service';
@@ -6,6 +7,7 @@ import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { UpsertCustomerDto } from './dto/upsert-customer.dto';
 
+@ApiAccess('customer')
 @Controller('customers')
 export class CustomersController {
   constructor(private readonly customersService: CustomersService) {}

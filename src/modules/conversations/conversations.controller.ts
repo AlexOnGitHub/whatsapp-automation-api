@@ -1,9 +1,11 @@
+import { ApiAccess } from '../../common/security/api-access.guard';
 import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
 
 import { ConversationsService } from './conversations.service';
 
 import { CreateConversationDto } from './dto/create-conversation.dto';
 
+@ApiAccess('conversation')
 @Controller('conversations')
 export class ConversationsController {
   constructor(private readonly conversationsService: ConversationsService) {}

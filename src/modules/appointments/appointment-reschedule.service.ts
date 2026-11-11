@@ -4,7 +4,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
-import { AppointmentStatus } from '@prisma/client';
+import {
+  AppointmentStatus,
+  IntegrationJobType,
+} from '@prisma/client';
 
 import { randomUUID } from 'crypto';
 
@@ -23,13 +26,18 @@ import { FLOW_KEYS } from '../../common/flows/flow-registry';
 
 import { BusinessesService } from '../businesses/businesses.service';
 
-import { BusinessConfigsService } from '../business-configs/business-configs.service';
-
 import { ServicesCatalogService } from '../services-catalog/services-catalog.service';
 
 import { AppointmentAvailabilityService } from '../appointment-availability/appointment-availability.service';
 
 import { InteractionLogsService } from '../interaction-logs/interaction-logs.service';
+
+import { IntegrationJobsService } from '../integration-jobs/integration-jobs.service';
+
+import {
+  GOOGLE_PROVIDER,
+  GOOGLE_WORKSPACE_INTEGRATION_TYPE,
+} from '../google/google.constants';
 
 import { AppointmentSlotUnavailableException } from '../appointment-booking/appointment-booking.errors';
 
@@ -53,13 +61,13 @@ export class AppointmentRescheduleService {
 
     private readonly businessesService: BusinessesService,
 
-    private readonly businessConfigsService: BusinessConfigsService,
-
     private readonly servicesCatalogService: ServicesCatalogService,
 
     private readonly appointmentAvailabilityService: AppointmentAvailabilityService,
 
     private readonly interactionLogsService: InteractionLogsService,
+
+    private readonly integrationJobsService: IntegrationJobsService,
   ) {}
 
   /* ─────────────────────────────────────────────
@@ -363,14 +371,11 @@ export class AppointmentRescheduleService {
 
           businessId,
 
-          /*
-           * Protege contra:
-           *
-           * RESCHEDULE vs CANCEL
-           * RESCHEDULE vs COMPLETE
-           * RESCHEDULE vs NO_SHOW
-           */
-          status: freshAppointment.status,
+          // Compare against the version read before validating availability.
+          status: appointment.status,
+          startTime: appointment.startTime,
+          endTime: appointment.endTime,
+          rescheduledAt: appointment.rescheduledAt,
         },
 
         data: {
@@ -389,15 +394,87 @@ export class AppointmentRescheduleService {
 
           status: AppointmentStatus.RESCHEDULED,
 
-          rescheduledAt: new Date(),
+          rescheduledAt: new Date(
+            Math.max(Date.now(), (appointment.rescheduledAt?.getTime() ?? 0) + 1),
+          ),
         },
       });
 
       if (updated.count !== 1) {
         throw new ConflictException(
-          'La cita cambió de estado mientras se procesaba la reprogramación',
+          'La cita cambió mientras se procesaba la reprogramación. Consulta su horario actual.',
         );
       }
+
+      /* ─────────────────────────────────────
+             GOOGLE CALENDAR OUTBOX
+          ───────────────────────────────────── */
+
+      /*
+       * Comprobamos que Google Workspace esté
+       * conectado y activo.
+       *
+       * Calendar utiliza las credenciales
+       * compartidas de Google Workspace.
+       *
+       * La modificación de la cita y la
+       * creación del IntegrationJob ocurren
+       * dentro de la misma transacción.
+       *
+       * Si cualquiera falla, ambas operaciones
+       * hacen rollback.
+       */
+      const googleIntegration = await tx.integration.findUnique({
+        where: {
+          businessId_provider_integrationType: {
+            businessId,
+
+            provider: GOOGLE_PROVIDER,
+
+            integrationType: GOOGLE_WORKSPACE_INTEGRATION_TYPE,
+          },
+        },
+
+        select: {
+          status: true,
+        },
+      });
+
+      if (googleIntegration) {
+        await this.integrationJobsService.enqueueWithTransaction(tx, {
+          businessId,
+
+          jobType: IntegrationJobType.GOOGLE_CALENDAR_UPDATE,
+
+          entityType: 'APPOINTMENT',
+
+          entityId: freshAppointment.id,
+
+          correlationId,
+
+          payload: {
+            source: 'APPOINTMENT_RESCHEDULE',
+
+            previousStatus: freshAppointment.status,
+
+            previousStartTime: freshAppointment.startTime.toISOString(),
+
+            previousEndTime: freshAppointment.endTime.toISOString(),
+
+            newStatus: AppointmentStatus.RESCHEDULED,
+
+            newStartTime: startTime.toISOString(),
+
+            newEndTime: endTime.toISOString(),
+
+            reason: dto.reason ?? null,
+          },
+        });
+      }
+
+      /* ─────────────────────────────────────
+             FRESH RESULT
+          ───────────────────────────────────── */
 
       return tx.appointment.findUniqueOrThrow({
         where: {

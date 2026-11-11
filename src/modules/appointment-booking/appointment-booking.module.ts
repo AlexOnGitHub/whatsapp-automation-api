@@ -10,12 +10,15 @@ import { InteractionLogsModule } from '../interaction-logs/interaction-logs.modu
 
 import { AppointmentBookingService } from './appointment-booking.service';
 
+import { IntegrationJobsModule } from '../integration-jobs/integration-jobs.module';
+
 @Module({
   imports: [
     BusinessesModule,
     ServicesCatalogModule,
     AppointmentAvailabilityModule,
     InteractionLogsModule,
+    IntegrationJobsModule,
   ],
 
   providers: [AppointmentBookingService],

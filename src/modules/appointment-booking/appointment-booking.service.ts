@@ -4,7 +4,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
-import { AppointmentStatus, Prisma, SessionStatus } from '@prisma/client';
+import {
+  AppointmentStatus,
+  IntegrationJobType,
+  Prisma,
+  SessionStatus,
+} from '@prisma/client';
 
 import { DateTime } from 'luxon';
 
@@ -21,6 +26,13 @@ import { ServicesCatalogService } from '../services-catalog/services-catalog.ser
 import { AppointmentAvailabilityService } from '../appointment-availability/appointment-availability.service';
 
 import { InteractionLogsService } from '../interaction-logs/interaction-logs.service';
+
+import { IntegrationJobsService } from '../integration-jobs/integration-jobs.service';
+
+import {
+  GOOGLE_PROVIDER,
+  GOOGLE_WORKSPACE_INTEGRATION_TYPE,
+} from '../google/google.constants';
 
 import { AppointmentSlotUnavailableException } from './appointment-booking.errors';
 
@@ -56,6 +68,8 @@ export class AppointmentBookingService {
     private readonly appointmentAvailabilityService: AppointmentAvailabilityService,
 
     private readonly interactionLogsService: InteractionLogsService,
+
+    private readonly integrationJobsService: IntegrationJobsService,
   ) {}
 
   /* ─────────────────────────────────────────────
@@ -124,17 +138,22 @@ export class AppointmentBookingService {
              ADVISORY LOCK
           ───────────────────────────────────── */
 
-      await tx.$queryRaw<{ lockResult: string | null }[]>`
-        SELECT
-          pg_advisory_xact_lock(
-            hashtext(${lockKey})::bigint
-          )::text AS "lockResult"
-      `;
+      await tx.$queryRaw<
+        {
+          lockResult: string | null;
+        }[]
+      >`
+            SELECT
+              pg_advisory_xact_lock(
+                hashtext(${lockKey})::bigint
+              )::text AS "lockResult"
+          `;
+
       /*
        * A partir de este punto ningún otro
-       * AppointmentBookingService para el
-       * mismo business/date puede continuar
-       * hasta que termine esta transacción.
+       * AppointmentBookingService para el mismo
+       * business/date puede continuar hasta
+       * finalizar esta transacción.
        */
 
       /* ─────────────────────────────────────
@@ -219,7 +238,7 @@ export class AppointmentBookingService {
       /*
        * Si alguien modificó la duración después
        * de que el usuario seleccionó el slot,
-       * obligamos a seleccionar horario otra vez.
+       * obligamos a seleccionar horario nuevamente.
        */
       if (freshService.durationMinutes !== service.durationMinutes) {
         throw new AppointmentSlotUnavailableException(
@@ -329,6 +348,60 @@ export class AppointmentBookingService {
       });
 
       /* ─────────────────────────────────────
+             GOOGLE CALENDAR OUTBOX
+          ───────────────────────────────────── */
+
+      /*
+       * Comprobamos que Google Workspace esté
+       * conectado y activo.
+       *
+       * Calendar utiliza las credenciales
+       * compartidas de Google Workspace.
+       *
+       * Si Google no está conectado o está
+       * deshabilitado, la cita continúa
+       * funcionando normalmente y no generamos
+       * el job de Calendar.
+       */
+      const googleIntegration = await tx.integration.findUnique({
+        where: {
+          businessId_provider_integrationType: {
+            businessId: params.businessId,
+
+            provider: GOOGLE_PROVIDER,
+
+            integrationType: GOOGLE_WORKSPACE_INTEGRATION_TYPE,
+          },
+        },
+
+        select: {
+          status: true,
+        },
+      });
+
+      if (googleIntegration) {
+        await this.integrationJobsService.enqueueWithTransaction(tx, {
+          businessId: params.businessId,
+
+          jobType: IntegrationJobType.GOOGLE_CALENDAR_CREATE,
+
+          entityType: 'APPOINTMENT',
+
+          entityId: appointment.id,
+
+          correlationId: params.correlationId,
+
+          payload: {
+            source: 'APPOINTMENT_BOOKING',
+
+            appointmentStatus: AppointmentStatus.CONFIRMED,
+
+            sessionId: session.id,
+          },
+        });
+      }
+
+      /* ─────────────────────────────────────
              ACTUALIZAR CONTEXT
           ───────────────────────────────────── */
 
@@ -370,6 +443,7 @@ export class AppointmentBookingService {
 
       return {
         appointment,
+
         session: completedSession,
       };
     });

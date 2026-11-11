@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 
 import type { calendar_v3 } from 'googleapis';
 
@@ -40,17 +41,38 @@ export class GoogleCalendarAdapterService {
         params.businessId,
       );
 
-    const requestBody = this.buildEventResource(params);
+    const eventId = createHash('sha256')
+      .update(JSON.stringify([params.businessId, params.appointmentId]))
+      .digest('hex');
+    const requestBody = { ...this.buildEventResource(params), id: eventId };
 
-    const response = await calendar.events.insert({
-      calendarId,
+    try {
+      const response = await calendar.events.insert({
+        calendarId,
+        requestBody,
+        sendUpdates: 'none',
+      });
 
-      requestBody,
+      return { event: response.data, created: true };
+    } catch (error) {
+      const response = (error as { response?: { status?: number } } | null)
+        ?.response;
 
-      sendUpdates: 'none',
-    });
+      if (response?.status !== 409) {
+        throw error;
+      }
 
-    return response.data;
+      const { data: event } = await calendar.events.get({ calendarId, eventId });
+      if (
+        event.id !== eventId ||
+        event.status === 'cancelled' ||
+        event.extendedProperties?.private?.appointmentId !== params.appointmentId
+      ) {
+        throw error;
+      }
+
+      return { event, created: false };
+    }
   }
 
   /* ─────────────────────────────────────────────
@@ -86,18 +108,61 @@ export class GoogleCalendarAdapterService {
     const { calendar, calendarId } =
       await this.googleCalendarClientService.getCalendarClient(businessId);
 
-    await calendar.events.delete({
-      calendarId,
+    await this.deleteCalendarEvent(calendar, calendarId, eventId);
 
-      eventId,
+    return { deleted: true, eventId };
+  }
 
-      sendUpdates: 'none',
-    });
+  async deleteUnlinkedAppointmentEvents(businessId: string, appointmentId: string) {
+    const { calendar, calendarId } =
+      await this.googleCalendarClientService.getCalendarClient(businessId);
 
-    return {
-      deleted: true,
-      eventId,
-    };
+    const eventIds: string[] = [];
+    let pageToken: string | undefined;
+    do {
+      const { data } = await calendar.events.list({
+        calendarId,
+        privateExtendedProperty: [`appointmentId=${appointmentId}`],
+        showDeleted: false,
+        fields: 'nextPageToken,items(id)',
+        pageToken,
+      });
+
+      for (const event of data.items ?? []) {
+        if (event.id) eventIds.push(event.id);
+      }
+      pageToken = data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    for (const eventId of eventIds) {
+      await this.deleteCalendarEvent(calendar, calendarId, eventId);
+    }
+
+    return eventIds[0];
+  }
+
+  private async deleteCalendarEvent(
+    calendar: calendar_v3.Calendar,
+    calendarId: string,
+    eventId: string,
+  ) {
+
+    try {
+      await calendar.events.delete({
+        calendarId,
+        eventId,
+        sendUpdates: 'none',
+      });
+    } catch (error) {
+      const response = (error as { response?: { status?: number } } | null)
+        ?.response;
+
+      // Calendar returns 410 when this event was already deleted.
+      if (response?.status !== 410) {
+        throw error;
+      }
+    }
+
   }
 
   /* ─────────────────────────────────────────────

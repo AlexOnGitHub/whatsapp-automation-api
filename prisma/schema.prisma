@@ -78,6 +78,22 @@ enum CustomerRequestStatus {
   CLOSED
 }
 
+enum IntegrationJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum IntegrationJobType {
+  GOOGLE_CALENDAR_CREATE
+  GOOGLE_CALENDAR_UPDATE
+  GOOGLE_CALENDAR_DELETE
+
+  GOOGLE_SHEETS_APPEND
+  GOOGLE_SHEETS_UPDATE
+}
+
 enum HumanHandoffStatus {
   PENDING
   IN_PROGRESS
@@ -126,6 +142,8 @@ model Business {
   customerRequests CustomerRequest[]
   humanHandoffs    HumanHandoff[]
   integrations     Integration[]
+  googleOAuthAttempts GoogleOAuthAttempt[]
+  integrationJobs  IntegrationJob[]
   interactionLogs  InteractionLog[]
   errorLogs        ErrorLog[]
 
@@ -315,6 +333,8 @@ model ConversationSession {
  */
 
 model Message {
+  flowProcessingStartedAt DateTime?
+  flowResult Json?
   id String @id @default(uuid())
 
   businessId String
@@ -583,6 +603,73 @@ model HumanHandoff {
 
 /**
  * ─────────────────────────────
+ * INTEGRATION JOBS
+ * ─────────────────────────────
+ */
+
+model IntegrationJob {
+  id String @id @default(uuid())
+
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  jobType IntegrationJobType
+
+  status IntegrationJobStatus @default(PENDING)
+
+  /**
+   * Entidad de dominio sobre la que opera el job.
+   * Ejemplo:
+   * APPOINTMENT
+   */
+  entityType String
+  entityId   String
+
+  /**
+   * Información adicional necesaria para ejecutar
+   * el trabajo sin acoplar el worker al request original.
+   */
+  payload Json?
+
+  correlationId String?
+
+  /**
+   * Retry policy.
+   */
+  attempts    Int @default(0)
+  maxAttempts Int @default(5)
+
+  /**
+   * Momento a partir del cual el job puede volver
+   * a ser procesado.
+   */
+  nextAttemptAt DateTime @default(now())
+
+  /**
+   * Lock lógico del worker.
+   */
+  lockedAt DateTime?
+  lockedBy String?
+
+  /**
+   * Diagnóstico del último fallo.
+   */
+  lastError String?
+
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, nextAttemptAt])
+  @@index([businessId, status])
+  @@index([businessId, entityType, entityId])
+  @@index([jobType, status])
+  @@index([createdAt])
+}
+
+/**
+ * ─────────────────────────────
  * INTEGRATIONS
  * ─────────────────────────────
  */
@@ -603,6 +690,7 @@ model Integration {
    * nunca como JSON en texto plano.
    */
   credentialsEncrypted String?
+  pendingCredentialsEncrypted String?
 
   settings Json?
 
@@ -694,4 +782,15 @@ model ErrorLog {
   @@index([businessId, createdAt])
   @@index([correlationId])
   @@index([createdAt])
+}
+
+
+model GoogleOAuthAttempt {
+  nonce      String   @id
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+
+  @@index([expiresAt])
+  @@index([businessId])
 }

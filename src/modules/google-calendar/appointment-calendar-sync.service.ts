@@ -4,16 +4,17 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
-import { AppointmentStatus, IntegrationStatus } from '@prisma/client';
+import { AppointmentStatus, IntegrationStatus, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../database/prisma/prisma.service';
 
 import { BusinessesService } from '../businesses/businesses.service';
 
 import {
-  GOOGLE_CALENDAR_INTEGRATION_TYPE,
-  GOOGLE_CALENDAR_PROVIDER,
-} from './google-calendar.constants';
+  GOOGLE_PROVIDER,
+  googleWorkspaceLockKey,
+  GOOGLE_WORKSPACE_INTEGRATION_TYPE,
+} from '../google/google.constants';
 
 import { GoogleCalendarAdapterService } from './google-calendar-adapter.service';
 
@@ -40,7 +41,13 @@ export class AppointmentCalendarSyncService {
      CREATE / ENSURE
   ───────────────────────────────────────────── */
 
-  async syncCreate(businessId: string, appointmentId: string) {
+  syncCreate(businessId: string, appointmentId: string) {
+    return this.withAppointmentLock(businessId, appointmentId, () =>
+      this.syncCreateLocked(businessId, appointmentId),
+    );
+  }
+
+  private async syncCreateLocked(businessId: string, appointmentId: string) {
     const { appointment, business } = await this.loadContext(
       businessId,
       appointmentId,
@@ -72,7 +79,7 @@ export class AppointmentCalendarSyncService {
     }
 
     try {
-      const event = await this.googleCalendarAdapterService.createEvent({
+      const eventParams = {
         businessId,
 
         appointmentId: appointment.id,
@@ -89,10 +96,21 @@ export class AppointmentCalendarSyncService {
         endTime: appointment.endTime,
 
         timeZone: business.timezone,
-      });
+      };
+
+      const { event, created } =
+        await this.googleCalendarAdapterService.createEvent(eventParams);
 
       if (!event.id) {
         throw new Error('Google Calendar no devolvió eventId');
+      }
+
+      if (!created) {
+        // The orphan may have been created before the latest reschedule.
+        await this.googleCalendarAdapterService.updateEvent({
+          ...eventParams,
+          eventId: event.id,
+        });
       }
 
       /*
@@ -121,8 +139,6 @@ export class AppointmentCalendarSyncService {
        * Si otra operación ganó la carrera después
        * de haber creado el evento remoto, tenemos
        * una situación excepcional de concurrencia.
-       *
-       * Por ahora la detectamos explícitamente.
        */
       if (updateResult.count !== 1) {
         throw new ConflictException(
@@ -135,7 +151,7 @@ export class AppointmentCalendarSyncService {
       return {
         synchronized: true,
 
-        created: true,
+        created,
 
         eventId: event.id,
 
@@ -152,7 +168,13 @@ export class AppointmentCalendarSyncService {
      UPDATE
   ───────────────────────────────────────────── */
 
-  async syncUpdate(businessId: string, appointmentId: string) {
+  syncUpdate(businessId: string, appointmentId: string) {
+    return this.withAppointmentLock(businessId, appointmentId, () =>
+      this.syncUpdateLocked(businessId, appointmentId),
+    );
+  }
+
+  private async syncUpdateLocked(businessId: string, appointmentId: string) {
     const { appointment, business } = await this.loadContext(
       businessId,
       appointmentId,
@@ -168,7 +190,7 @@ export class AppointmentCalendarSyncService {
      * sincronización inicial haya fallado.
      */
     if (!appointment.googleCalendarEventId) {
-      return this.syncCreate(businessId, appointmentId);
+      return this.syncCreateLocked(businessId, appointmentId);
     }
 
     try {
@@ -215,7 +237,13 @@ export class AppointmentCalendarSyncService {
      DELETE
   ───────────────────────────────────────────── */
 
-  async syncDelete(businessId: string, appointmentId: string) {
+  syncDelete(businessId: string, appointmentId: string) {
+    return this.withAppointmentLock(businessId, appointmentId, () =>
+      this.syncDeleteLocked(businessId, appointmentId),
+    );
+  }
+
+  private async syncDeleteLocked(businessId: string, appointmentId: string) {
     /*
      * Aquí deliberadamente NO usamos
      * ensureCanCreateOrUpdate().
@@ -235,24 +263,26 @@ export class AppointmentCalendarSyncService {
       throw new NotFoundException('No se encontró la cita');
     }
 
-    /*
-     * Idempotencia:
-     * no existe vínculo remoto, por lo tanto
-     * el estado deseado ya está conseguido.
-     */
-    if (!appointment.googleCalendarEventId) {
-      return {
-        synchronized: true,
-
-        deleted: false,
-
-        reason: 'NO_REMOTE_EVENT',
-      };
-    }
-
     const eventId = appointment.googleCalendarEventId;
 
     try {
+      if (!eventId) {
+        // A completed insert may have lost its local link before cancellation.
+        const recoveredId = appointment.status === AppointmentStatus.CANCELLED
+          ? await this.googleCalendarAdapterService.deleteUnlinkedAppointmentEvents(
+              businessId,
+              appointmentId,
+            )
+          : undefined;
+
+        if (recoveredId) {
+          await this.markIntegrationSuccess(businessId);
+          return { synchronized: true, deleted: true, eventId: recoveredId };
+        }
+
+        return { synchronized: true, deleted: false, reason: 'NO_REMOTE_EVENT' };
+      }
+
       await this.googleCalendarAdapterService.deleteEvent(businessId, eventId);
 
       /*
@@ -300,6 +330,36 @@ export class AppointmentCalendarSyncService {
      DOMAIN VALIDATION
   ───────────────────────────────────────────── */
 
+  private withAppointmentLock<T>(
+    businessId: string,
+    appointmentId: string,
+    synchronize: () => Promise<T>,
+  ): Promise<T> {
+    const key = JSON.stringify(['google-calendar', businessId, appointmentId]);
+
+    // The transaction holds the cross-process lock. Synchronization persists
+    // its changes separately so a remote operation can be recovered on retry.
+    return this.prisma.$transaction(
+      async (tx) => {
+        const [lock] = await tx.$queryRaw<{ acquired: boolean }[]>`
+          SELECT CASE
+            WHEN pg_try_advisory_xact_lock_shared(hashtextextended(${googleWorkspaceLockKey(businessId)}, 0))
+            THEN pg_try_advisory_xact_lock(hashtextextended(${key}, 0))
+            ELSE FALSE
+          END AS acquired
+        `;
+
+        if (!lock?.acquired) {
+          throw new ConflictException('La cita ya se está sincronizando con Google Calendar');
+        }
+
+        return synchronize();
+      },
+      { timeout: 90_000 },
+    );
+  }
+
+
   private ensureCanCreateOrUpdate(status: AppointmentStatus) {
     if (!SYNCHRONIZABLE_APPOINTMENT_STATUSES.includes(status)) {
       throw new ConflictException(
@@ -329,6 +389,7 @@ export class AppointmentCalendarSyncService {
 
     return {
       business,
+
       appointment,
     };
   }
@@ -337,7 +398,7 @@ export class AppointmentCalendarSyncService {
      EVENT CONTENT
   ───────────────────────────────────────────── */
 
-  private buildSummary(serviceName: string, customerName: string) {
+  private buildSummary(serviceName: string, customerName: string): string {
     return `${serviceName} - ${customerName}`;
   }
 
@@ -353,7 +414,7 @@ export class AppointmentCalendarSyncService {
     notes: string | null;
 
     source: string | null;
-  }) {
+  }): string {
     return [
       'Cita generada por WhatUp',
 
@@ -378,24 +439,19 @@ export class AppointmentCalendarSyncService {
   }
 
   /* ─────────────────────────────────────────────
-     INTEGRATION STATUS
+     GOOGLE WORKSPACE STATUS
   ───────────────────────────────────────────── */
 
   private async markIntegrationSuccess(businessId: string) {
-    await this.prisma.integration.update({
+    await this.prisma.integration.updateMany({
       where: {
-        businessId_provider_integrationType: {
-          businessId,
-
-          provider: GOOGLE_CALENDAR_PROVIDER,
-
-          integrationType: GOOGLE_CALENDAR_INTEGRATION_TYPE,
-        },
+        businessId,
+        provider: GOOGLE_PROVIDER,
+        integrationType: GOOGLE_WORKSPACE_INTEGRATION_TYPE,
+        status: IntegrationStatus.ACTIVE,
       },
 
       data: {
-        status: IntegrationStatus.ACTIVE,
-
         lastSyncedAt: new Date(),
 
         lastError: null,
@@ -412,21 +468,29 @@ export class AppointmentCalendarSyncService {
         : 'Error desconocido de Google Calendar';
 
     try {
-      await this.prisma.integration.update({
+      await this.prisma.integration.updateMany({
         where: {
-          businessId_provider_integrationType: {
-            businessId,
-
-            provider: GOOGLE_CALENDAR_PROVIDER,
-
-            integrationType: GOOGLE_CALENDAR_INTEGRATION_TYPE,
-          },
+          businessId,
+          provider: GOOGLE_PROVIDER,
+          integrationType: GOOGLE_WORKSPACE_INTEGRATION_TYPE,
+          status: IntegrationStatus.ACTIVE,
         },
 
         data: {
-          status: IntegrationStatus.ERROR,
-
-          lastError: message.slice(0, 2000),
+          /*
+           * IMPORTANTE:
+           *
+           * No cambiamos WORKSPACE a ERROR por
+           * cualquier fallo operacional de Calendar.
+           *
+           * Un timeout, rate limit o fallo temporal
+           * debe poder ser reintentado por
+           * IntegrationJobs.
+           *
+           * Además, Calendar no debe deshabilitar
+           * accidentalmente Google Sheets.
+           */
+          lastError: `Google Calendar: ${message}`.slice(0, 2000),
 
           lastErrorAt: new Date(),
         },

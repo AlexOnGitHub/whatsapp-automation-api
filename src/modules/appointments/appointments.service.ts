@@ -4,7 +4,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
-import { AppointmentStatus, Prisma } from '@prisma/client';
+import {
+  AppointmentStatus,
+  IntegrationJobType,
+  Prisma,
+} from '@prisma/client';
 
 import { randomUUID } from 'crypto';
 
@@ -19,6 +23,13 @@ import { BusinessesService } from '../businesses/businesses.service';
 import { CustomersService } from '../customers/customers.service';
 
 import { InteractionLogsService } from '../interaction-logs/interaction-logs.service';
+
+import { IntegrationJobsService } from '../integration-jobs/integration-jobs.service';
+
+import {
+  GOOGLE_PROVIDER,
+  GOOGLE_WORKSPACE_INTEGRATION_TYPE,
+} from '../google/google.constants';
 
 import type { InteractionEventType } from '../../common/constants/interaction-event-types';
 
@@ -42,6 +53,8 @@ export class AppointmentsService {
     private readonly customersService: CustomersService,
 
     private readonly interactionLogsService: InteractionLogsService,
+
+    private readonly integrationJobsService: IntegrationJobsService,
   ) {}
 
   /* ─────────────────────────────────────────────
@@ -130,6 +143,7 @@ export class AppointmentsService {
     return this.prisma.appointment.findMany({
       where: {
         businessId,
+
         customerId,
       },
 
@@ -153,6 +167,7 @@ export class AppointmentsService {
     return this.prisma.appointment.findMany({
       where: {
         businessId,
+
         customerId,
 
         status: {
@@ -181,33 +196,142 @@ export class AppointmentsService {
   ) {
     const correlationId = dto.correlationId ?? randomUUID();
 
-    const appointment = await this.findById(businessId, appointmentId);
+    await this.businessesService.findById(businessId);
 
-    this.ensureTransitionAllowed(
-      appointment.status,
-      AppointmentStatus.CANCELLED,
-    );
+    const result = await this.prisma.$transaction(async (tx) => {
+      /* ─────────────────────────────────
+             FRESH APPOINTMENT
+          ───────────────────────────────── */
 
-    const now = new Date();
+      const appointment = await tx.appointment.findFirst({
+        where: {
+          id: appointmentId,
 
-    const updated = await this.updateStatusSafely({
-      appointmentId: appointment.id,
+          businessId,
+        },
+      });
 
-      businessId,
+      if (!appointment) {
+        throw new NotFoundException(
+          `No se encontró la cita ${appointmentId} para el negocio indicado`,
+        );
+      }
 
-      currentStatus: appointment.status,
+      this.ensureTransitionAllowed(
+        appointment.status,
 
-      targetStatus: AppointmentStatus.CANCELLED,
+        AppointmentStatus.CANCELLED,
+      );
 
-      data: {
-        status: AppointmentStatus.CANCELLED,
+      const now = new Date();
 
-        cancelledAt: now,
-      },
+      /* ─────────────────────────────────
+             COMPARE-AND-SET
+          ───────────────────────────────── */
+
+      const updated = await tx.appointment.updateMany({
+        where: {
+          id: appointment.id,
+
+          businessId,
+
+          status: appointment.status,
+        },
+
+        data: {
+          status: AppointmentStatus.CANCELLED,
+
+          cancelledAt: now,
+        },
+      });
+
+      if (updated.count !== 1) {
+        throw new ConflictException(
+          'La cita cambió de estado mientras se procesaba la cancelación',
+        );
+      }
+
+      /* ─────────────────────────────────
+             GOOGLE CALENDAR OUTBOX
+          ───────────────────────────────── */
+
+      /*
+       * Comprobamos que Google Workspace esté
+       * conectado y activo.
+       *
+       * Calendar utiliza las credenciales
+       * compartidas de Google Workspace.
+       *
+       * La cancelación de la cita y la creación
+       * del job DELETE ocurren dentro de la misma
+       * transacción.
+       *
+       * Si cualquiera de las dos operaciones
+       * falla, ambas hacen rollback.
+       */
+      const googleIntegration = await tx.integration.findUnique({
+        where: {
+          businessId_provider_integrationType: {
+            businessId,
+
+            provider: GOOGLE_PROVIDER,
+
+            integrationType: GOOGLE_WORKSPACE_INTEGRATION_TYPE,
+          },
+        },
+
+        select: {
+          status: true,
+        },
+      });
+
+      if (googleIntegration) {
+        await this.integrationJobsService.enqueueWithTransaction(tx, {
+          businessId,
+
+          jobType: IntegrationJobType.GOOGLE_CALENDAR_DELETE,
+
+          entityType: 'APPOINTMENT',
+
+          entityId: appointment.id,
+
+          correlationId,
+
+          payload: {
+            source: 'APPOINTMENT_CANCEL',
+
+            previousStatus: appointment.status,
+
+            newStatus: AppointmentStatus.CANCELLED,
+
+            previousStartTime: appointment.startTime.toISOString(),
+
+            previousEndTime: appointment.endTime.toISOString(),
+
+            googleCalendarEventId: appointment.googleCalendarEventId ?? null,
+
+            reason: dto.reason ?? null,
+          },
+        });
+      }
+
+      /* ─────────────────────────────────
+             FRESH RESULT
+          ───────────────────────────────── */
+
+      return tx.appointment.findUniqueOrThrow({
+        where: {
+          id: appointment.id,
+        },
+      });
     });
 
+    /* ───────────────────────────────────────────
+       OBSERVABILIDAD
+    ─────────────────────────────────────────── */
+
     await this.writeLifecycleLogSafely({
-      appointment: updated,
+      appointment: result,
 
       correlationId,
 
@@ -218,7 +342,7 @@ export class AppointmentsService {
       reason: dto.reason,
     });
 
-    return updated;
+    return result;
   }
 
   /* ─────────────────────────────────────────────
@@ -236,6 +360,7 @@ export class AppointmentsService {
 
     this.ensureTransitionAllowed(
       appointment.status,
+
       AppointmentStatus.COMPLETED,
     );
 
@@ -285,7 +410,11 @@ export class AppointmentsService {
 
     const appointment = await this.findById(businessId, appointmentId);
 
-    this.ensureTransitionAllowed(appointment.status, AppointmentStatus.NO_SHOW);
+    this.ensureTransitionAllowed(
+      appointment.status,
+
+      AppointmentStatus.NO_SHOW,
+    );
 
     const now = new Date();
 
@@ -326,7 +455,6 @@ export class AppointmentsService {
 
   private ensureTransitionAllowed(
     current: AppointmentStatus,
-
     target: AppointmentStatus,
   ) {
     const allowedTransitions: Record<AppointmentStatus, AppointmentStatus[]> = {

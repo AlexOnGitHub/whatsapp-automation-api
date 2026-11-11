@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 
-import { IntegrationStatus } from '@prisma/client';
+import { GoogleCalendarConnectionService } from './google-calendar-connection.service';
 
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 
@@ -13,13 +13,20 @@ import { IntegrationCryptoService } from '../../common/security/integration-cryp
 import { BusinessesService } from '../businesses/businesses.service';
 
 import {
-  GOOGLE_CALENDAR_DEFAULT_ID,
-  GOOGLE_CALENDAR_INTEGRATION_TYPE,
-  GOOGLE_CALENDAR_PROVIDER,
-  GOOGLE_CALENDAR_SCOPES,
-} from './google-calendar.constants';
+  GOOGLE_CALENDAR_SCOPE,
+  GOOGLE_WORKSPACE_SCOPES,
+} from './google.constants';
 
-type GoogleStoredCredentials = {
+/*
+ * Evitamos importar OAuth2Client directamente
+ * desde google-auth-library.
+ *
+ * googleapis ya expone el constructor que usamos
+ * en runtime, así que obtenemos el tipo desde ahí.
+ */
+export type GoogleOAuth2Client = InstanceType<typeof google.auth.OAuth2>;
+
+export type GoogleStoredCredentials = {
   accessToken?: string | null;
 
   refreshToken: string | null;
@@ -37,43 +44,50 @@ type OAuthStatePayload = {
   nonce: string;
 
   exp: number;
+  calendarId?: string;
 };
 
 @Injectable()
-export class GoogleCalendarOAuthService {
+export class GoogleOAuthService {
   constructor(
     private readonly prisma: PrismaService,
 
     private readonly businessesService: BusinessesService,
 
     private readonly cryptoService: IntegrationCryptoService,
+    private readonly calendarConnection: GoogleCalendarConnectionService,
   ) {}
 
   /* ─────────────────────────────────────────────
      AUTH URL
   ───────────────────────────────────────────── */
 
-  async generateAuthorizationUrl(businessId: string) {
+  async generateAuthorizationUrl(businessId: string, calendarId?: string): Promise<{
+    authorizationUrl: string;
+  }> {
     await this.businessesService.ensureBusinessIsActive(businessId);
 
     const oauth2Client = this.createOAuthClient();
 
-    const state = this.createState(businessId);
+    if (calendarId !== undefined && (typeof calendarId !== 'string' || !calendarId.trim() || calendarId.length > 1024)) {
+      throw new BadRequestException('calendarId inválido');
+    }
+    const state = await this.createState(businessId, calendarId?.trim());
 
-    const url = oauth2Client.generateAuthUrl({
+    const authorizationUrl = oauth2Client.generateAuthUrl({
       access_type: 'offline',
 
       include_granted_scopes: true,
 
       prompt: 'consent',
 
-      scope: [...GOOGLE_CALENDAR_SCOPES],
+      scope: [...GOOGLE_WORKSPACE_SCOPES],
 
       state,
     });
 
     return {
-      authorizationUrl: url,
+      authorizationUrl,
     };
   }
 
@@ -82,7 +96,7 @@ export class GoogleCalendarOAuthService {
   ───────────────────────────────────────────── */
 
   async handleCallback(code: string, state: string) {
-    if (!code || !state) {
+    if (typeof code !== 'string' || !code || typeof state !== 'string' || !state) {
       throw new BadRequestException('code y state son obligatorios');
     }
 
@@ -94,12 +108,30 @@ export class GoogleCalendarOAuthService {
 
     const oauth2Client = this.createOAuthClient();
 
+    const consumed = await this.prisma.googleOAuthAttempt.deleteMany({
+      where: {
+        nonce: statePayload.nonce,
+        businessId: statePayload.businessId,
+        expiresAt: { gt: new Date() },
+      },
+    });
+
+    if (consumed.count !== 1) {
+      throw new BadRequestException(
+        'El intento de conexión de Google expiró o ya fue utilizado. Inicia una nueva conexión.',
+      );
+    }
+
     const { tokens } = await oauth2Client.getToken(code);
 
     if (!tokens.refresh_token) {
       throw new BadRequestException(
         'Google no devolvió refresh_token. Reconecta la integración autorizando acceso offline.',
       );
+    }
+
+    if (!tokens.scope?.split(/\s+/).includes(GOOGLE_CALENDAR_SCOPE)) {
+      throw new BadRequestException('Concede el permiso para ver y editar eventos de Google Calendar');
     }
 
     const credentials: GoogleStoredCredentials = {
@@ -116,66 +148,20 @@ export class GoogleCalendarOAuthService {
 
     const credentialsEncrypted = this.cryptoService.encrypt(credentials);
 
-    const integration = await this.prisma.integration.upsert({
-      where: {
-        businessId_provider_integrationType: {
-          businessId: statePayload.businessId,
-
-          provider: GOOGLE_CALENDAR_PROVIDER,
-
-          integrationType: GOOGLE_CALENDAR_INTEGRATION_TYPE,
-        },
-      },
-
-      create: {
-        businessId: statePayload.businessId,
-
-        provider: GOOGLE_CALENDAR_PROVIDER,
-
-        integrationType: GOOGLE_CALENDAR_INTEGRATION_TYPE,
-
-        status: IntegrationStatus.ACTIVE,
-
-        credentialsEncrypted,
-
-        settings: {
-          calendarId: GOOGLE_CALENDAR_DEFAULT_ID,
-        },
-
-        lastError: null,
-
-        lastErrorAt: null,
-      },
-
-      update: {
-        status: IntegrationStatus.ACTIVE,
-
-        credentialsEncrypted,
-
-        lastError: null,
-
-        lastErrorAt: null,
-      },
-    });
-
-    return {
-      connected: true,
-
-      businessId: integration.businessId,
-
-      provider: integration.provider,
-
-      integrationType: integration.integrationType,
-
-      status: integration.status,
-    };
+    oauth2Client.setCredentials(tokens);
+    return this.calendarConnection.connect(
+      statePayload.businessId,
+      oauth2Client,
+      credentialsEncrypted,
+      statePayload.calendarId,
+    );
   }
 
   /* ─────────────────────────────────────────────
      OAUTH CLIENT
   ───────────────────────────────────────────── */
 
-  private createOAuthClient() {
+  private createOAuthClient(): GoogleOAuth2Client {
     const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
 
     const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
@@ -195,10 +181,11 @@ export class GoogleCalendarOAuthService {
      STATE
   ───────────────────────────────────────────── */
 
-  private createState(businessId: string): string {
+  private async createState(businessId: string, calendarId?: string): Promise<string> {
     const payload: OAuthStatePayload = {
       businessId,
 
+      calendarId,
       nonce: randomBytes(24).toString('hex'),
 
       exp: Date.now() + 10 * 60 * 1000,
@@ -208,13 +195,25 @@ export class GoogleCalendarOAuthService {
 
     const signature = this.signState(encoded);
 
+    await this.prisma.googleOAuthAttempt.deleteMany({
+      where: { expiresAt: { lte: new Date() } },
+    });
+
+    await this.prisma.googleOAuthAttempt.create({
+      data: {
+        nonce: payload.nonce,
+        businessId: payload.businessId,
+        expiresAt: new Date(payload.exp),
+      },
+    });
+
     return `${encoded}.${signature}`;
   }
 
   private verifyState(state: string): OAuthStatePayload {
-    const [encoded, suppliedSignature] = state.split('.');
+    const [encoded, suppliedSignature, extra] = state.split('.');
 
-    if (!encoded || !suppliedSignature) {
+    if (!encoded || !suppliedSignature || extra !== undefined || !/^[a-f0-9]{64}$/.test(suppliedSignature)) {
       throw new BadRequestException('OAuth state inválido');
     }
 
@@ -245,7 +244,7 @@ export class GoogleCalendarOAuthService {
       throw new BadRequestException('OAuth state incompleto');
     }
 
-    if (payload.exp < Date.now()) {
+    if (payload.exp <= Date.now()) {
       throw new BadRequestException('OAuth state expirado');
     }
 

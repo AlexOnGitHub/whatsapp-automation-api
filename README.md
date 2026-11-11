@@ -96,3 +96,23 @@ Nest is an MIT-licensed open source project. It can grow thanks to the sponsors 
 ## License
 
 Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+
+## Acceso a la API
+
+Configura `API_ADMIN_TOKEN` para administración. Para el operador interno,
+configura un `API_SERVICE_TOKEN` distinto y su `API_SERVICE_BUSINESS_ID`.
+Usa tokens aleatorios de alta entropía y envía `Authorization: Bearer <token>`.
+La configuración admite un negocio operador por instancia. El retorno de
+Google OAuth usa su parámetro `state`; la URL para iniciar OAuth requiere
+el token administrativo. El worker se ejecuta dentro de NestJS.
+
+
+## Arranque con el lockfile
+
+Usa Node 22.12+ o 24 y la versión de pnpm declarada en el manifiesto.
+Copia .env.example a .env y asigna valores a las credenciales antes de arrancar.
+Ejecuta pnpm install --frozen-lockfile, pnpm exec prisma generate,
+pnpm exec prisma migrate deploy, pnpm build y pnpm start:prod. Aplica las
+migraciones desde la etapa de build antes de instalar solo dependencias de ejecución.
+
+Consulta el [contrato del operador](docs/operator-api.md) para la integración HTTP.

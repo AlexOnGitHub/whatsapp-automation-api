@@ -1,3 +1,4 @@
+import { ApiAccess } from '../../common/security/api-access.guard';
 import {
   Body,
   Controller,
@@ -20,6 +21,7 @@ import { RescheduleAppointmentDto } from './dto/reschedule-appointment.dto';
 
 import { ListAppointmentsQueryDto } from './dto/list-appointments-query.dto';
 
+@ApiAccess('appointment')
 @Controller('businesses/:businessId/appointments')
 export class AppointmentsController {
   constructor(

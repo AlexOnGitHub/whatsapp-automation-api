@@ -165,6 +165,9 @@ export class MessagesService {
       });
 
       if (existing) {
+        if (existing.businessId !== dto.businessId || existing.customerId !== dto.customerId || existing.conversationId !== (dto.conversationId ?? null) || existing.direction !== MessageDirection.INBOUND) {
+          throw new ConflictException('El identificador de WhatsApp ya está asociado a otro mensaje');
+        }
         return {
           message: existing,
           duplicated: true,
@@ -188,6 +191,9 @@ export class MessagesService {
         });
 
         if (existing) {
+          if (existing.businessId !== dto.businessId || existing.customerId !== dto.customerId || existing.conversationId !== (dto.conversationId ?? null) || existing.direction !== MessageDirection.INBOUND) {
+            throw new ConflictException('El identificador de WhatsApp ya está asociado a otro mensaje');
+          }
           return {
             message: existing,
             duplicated: true,

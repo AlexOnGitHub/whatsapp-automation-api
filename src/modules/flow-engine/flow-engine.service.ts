@@ -1,6 +1,8 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
 
 import { randomUUID } from 'crypto';
+import { MessageDirection, Prisma } from '@prisma/client';
+import { PrismaService } from '../../database/prisma/prisma.service';
 
 import {
   FLOW_KEYS,
@@ -31,6 +33,8 @@ import { ProcessFlowMessageDto } from './dto/process-flow-message.dto';
 @Injectable()
 export class FlowEngineService {
   constructor(
+    private readonly prisma: PrismaService,
+
     private readonly businessesService: BusinessesService,
 
     private readonly customersService: CustomersService,
@@ -55,6 +59,57 @@ export class FlowEngineService {
   ───────────────────────────────────────────── */
 
   async process(dto: ProcessFlowMessageDto): Promise<FlowEngineResult> {
+    const key = JSON.stringify(['flow-conversation', dto.businessId, dto.conversationId]);
+    return this.prisma.$transaction(async (tx) => {
+      const [lock] = await tx.$queryRaw<{ acquired: boolean }[]>`
+        SELECT pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) AS acquired
+      `;
+      if (!lock?.acquired) {
+        throw new ConflictException({
+          code: 'FLOW_CONVERSATION_BUSY',
+          message: 'Ya se está procesando un mensaje de esta conversación',
+        });
+      }
+
+      if (!dto.messageId) return this.executeFlow(dto);
+
+      const where = {
+        id: dto.messageId,
+        businessId: dto.businessId,
+        customerId: dto.customerId,
+        conversationId: dto.conversationId,
+        direction: MessageDirection.INBOUND,
+      };
+      const message = await this.prisma.message.findFirst({
+        where,
+        select: { flowResult: true, flowProcessingStartedAt: true },
+      });
+      if (!message) throw new BadRequestException('El mensaje entrante no pertenece a la conversación');
+      if (message.flowResult) return message.flowResult as unknown as FlowEngineResult;
+
+      // Persist the receipt before invoking handlers. If an effect committed
+      // before the process stopped, a replay must not execute the handler again.
+      const claimed = await this.prisma.message.updateMany({
+        where: { ...where, flowProcessingStartedAt: null },
+        data: { flowProcessingStartedAt: new Date() },
+      });
+      if (claimed.count !== 1) {
+        throw new ConflictException({
+          code: 'FLOW_MESSAGE_OUTCOME_UNKNOWN',
+          message: 'El intento anterior no registró un resultado. Revisa la conversación antes de continuar.',
+        });
+      }
+
+      const result = await this.executeFlow(dto);
+      await this.prisma.message.update({
+        where: { id: dto.messageId },
+        data: { flowResult: JSON.parse(JSON.stringify(result)) as Prisma.InputJsonValue },
+      });
+      return result;
+    }, { timeout: 30_000 });
+  }
+
+  private async executeFlow(dto: ProcessFlowMessageDto): Promise<FlowEngineResult> {
     const correlationId = dto.correlationId ?? randomUUID();
 
     try {

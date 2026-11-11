@@ -2,11 +2,9 @@ import { Module } from '@nestjs/common';
 
 import { BusinessesModule } from '../businesses/businesses.module';
 
-import { IntegrationCryptoService } from '../../common/security/integration-crypto.service';
+import { GoogleModule } from '../google/google.module';
 
 import { GoogleCalendarController } from './google-calendar.controller';
-
-import { GoogleCalendarOAuthService } from './google-calendar-oauth.service';
 
 import { GoogleCalendarClientService } from './google-calendar-client.service';
 
@@ -15,15 +13,11 @@ import { GoogleCalendarAdapterService } from './google-calendar-adapter.service'
 import { AppointmentCalendarSyncService } from './appointment-calendar-sync.service';
 
 @Module({
-  imports: [BusinessesModule],
+  imports: [BusinessesModule, GoogleModule],
 
   controllers: [GoogleCalendarController],
 
   providers: [
-    IntegrationCryptoService,
-
-    GoogleCalendarOAuthService,
-
     GoogleCalendarClientService,
 
     GoogleCalendarAdapterService,
@@ -32,10 +26,6 @@ import { AppointmentCalendarSyncService } from './appointment-calendar-sync.serv
   ],
 
   exports: [
-    IntegrationCryptoService,
-
-    GoogleCalendarOAuthService,
-
     GoogleCalendarClientService,
 
     GoogleCalendarAdapterService,

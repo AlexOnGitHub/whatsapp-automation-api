@@ -1,3 +1,4 @@
+import { ApiAccess } from '../../common/security/api-access.guard';
 import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
 
 import { Prisma } from '@prisma/client';
@@ -9,6 +10,7 @@ import { CreateOutboundMessageDto } from './dto/create-outbound-message.dto';
 import { RegisterSentDto } from './dto/register-sent.dto';
 import { RegisterDeliveryStatusDto } from './dto/register-delivery-status.dto';
 
+@ApiAccess('message')
 @Controller('messages')
 export class MessagesController {
   constructor(private readonly messagesService: MessagesService) {}
@@ -48,8 +50,9 @@ export class MessagesController {
   ───────────────────────────────────────────── */
 
   @Post('inbound')
-  createInbound(@Body() dto: CreateInboundMessageDto) {
-    return this.messagesService.createInbound(dto);
+  async createInbound(@Body() dto: CreateInboundMessageDto) {
+    const { message } = await this.messagesService.createInboundIdempotent(dto);
+    return message;
   }
 
   @Post('outbound')
@@ -77,6 +80,7 @@ export class MessagesController {
     });
   }
 
+  @ApiAccess('delivery')
   @Post('delivery-status')
   registerDeliveryStatus(@Body() dto: RegisterDeliveryStatusDto) {
     return this.messagesService.registerDeliveryStatus({

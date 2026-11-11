@@ -18,6 +18,8 @@ import { AppointmentsService } from './appointments.service';
 
 import { AppointmentRescheduleService } from './appointment-reschedule.service';
 
+import { IntegrationJobsModule } from '../integration-jobs/integration-jobs.module';
+
 @Module({
   imports: [
     BusinessesModule,
@@ -26,6 +28,7 @@ import { AppointmentRescheduleService } from './appointment-reschedule.service';
     ServicesCatalogModule,
     AppointmentAvailabilityModule,
     InteractionLogsModule,
+    IntegrationJobsModule,
   ],
 
   controllers: [AppointmentsController],
